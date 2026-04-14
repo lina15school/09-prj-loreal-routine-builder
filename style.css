@@ -291,6 +291,31 @@ body {
   border: 1px solid #e7cf9a;
 }
 
+.assistant-message .assistant-line {
+  margin: 0;
+}
+
+.assistant-message .assistant-gap {
+  height: 6px;
+}
+
+.assistant-message ul,
+.assistant-message ol {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.assistant-message li {
+  margin: 2px 0;
+}
+
+.assistant-message code {
+  background: #fff7df;
+  border: 1px solid #ebd6a7;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .user-message {
   margin-left: auto;
   background: #ffe6ee;

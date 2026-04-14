@@ -46,6 +46,91 @@ function escapeHtml(text) {
     .replaceAll("'", "&#039;");
 }
 
+function formatInlineMarkdown(escapedText) {
+  return escapedText
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
+function formatAssistantMessage(content) {
+  const safeContent = escapeHtml(String(content || ""));
+  const lines = safeContent.split("\n");
+  const rendered = [];
+  let listType = "";
+  let previousLineWasEmpty = false;
+
+  lines.forEach((line) => {
+    const headingMatch = line.match(/^\s*#{1,6}\s+(.+)$/);
+    const unorderedMatch = line.match(/^\s*[-*]\s+(.+)$/);
+    const orderedMatch = line.match(/^\s*\d+\.\s+(.+)$/);
+
+    if (!line.trim()) {
+      if (listType) {
+        rendered.push(listType === "ul" ? "</ul>" : "</ol>");
+        listType = "";
+      }
+
+      // Keep blank-line spacing subtle and avoid stacking large gaps.
+      if (!previousLineWasEmpty) {
+        rendered.push('<div class="assistant-gap"></div>');
+      }
+      previousLineWasEmpty = true;
+      return;
+    }
+
+    previousLineWasEmpty = false;
+
+    if (unorderedMatch) {
+      if (listType === "ol") {
+        rendered.push("</ol>");
+        listType = "";
+      }
+      if (!listType) {
+        rendered.push("<ul>");
+        listType = "ul";
+      }
+      rendered.push(`<li>${formatInlineMarkdown(unorderedMatch[1])}</li>`);
+      return;
+    }
+
+    if (orderedMatch) {
+      if (listType === "ul") {
+        rendered.push("</ul>");
+        listType = "";
+      }
+      if (!listType) {
+        rendered.push("<ol>");
+        listType = "ol";
+      }
+      rendered.push(`<li>${formatInlineMarkdown(orderedMatch[1])}</li>`);
+      return;
+    }
+
+    if (listType) {
+      rendered.push(listType === "ul" ? "</ul>" : "</ol>");
+      listType = "";
+    }
+
+    if (headingMatch) {
+      rendered.push(
+        `<div class="assistant-line"><strong>${formatInlineMarkdown(headingMatch[1])}</strong></div>`,
+      );
+      return;
+    }
+
+    rendered.push(
+      `<div class="assistant-line">${formatInlineMarkdown(line)}</div>`,
+    );
+  });
+
+  if (listType) {
+    rendered.push(listType === "ul" ? "</ul>" : "</ol>");
+  }
+
+  return rendered.join("");
+}
+
 function saveSelectedProducts() {
   localStorage.setItem(
     SELECTED_PRODUCTS_STORAGE_KEY,
@@ -203,6 +288,10 @@ function toggleProductSelection(productId) {
 /* ---------- Chat helpers ---------- */
 function appendMessage(role, content, citations = []) {
   const roleClass = role === "user" ? "user-message" : "assistant-message";
+  const renderedContent =
+    role === "assistant"
+      ? formatAssistantMessage(content)
+      : escapeHtml(String(content || "")).replaceAll("\n", "<br>");
 
   const citationsHtml =
     citations.length > 0
@@ -218,7 +307,7 @@ function appendMessage(role, content, citations = []) {
 
   const messageHtml = `
     <div class="message ${roleClass}">
-      ${escapeHtml(content).replaceAll("\n", "<br>")}
+      ${renderedContent}
       ${citationsHtml}
     </div>
   `;
@@ -227,24 +316,40 @@ function appendMessage(role, content, citations = []) {
   chatWindow.scrollTop = chatWindow.scrollHeight;
 }
 
-function topicIsAllowed(text) {
-  const lowercaseText = text.toLowerCase();
-  const allowedTopics = [
-    "routine",
-    "skincare",
-    "haircare",
-    "makeup",
-    "fragrance",
-    "cleanser",
-    "moisturizer",
-    "serum",
-    "sunscreen",
-    "hair",
-    "skin",
-    "beauty",
+async function topicIsAllowedByLlm(text) {
+  const classifierMessages = [
+    {
+      role: "system",
+      content:
+        "You are a lenient classifier for a beauty assistant. Allow almost all user follow-up questions unless they are clearly unrelated to beauty, skincare, haircare, makeup, fragrance, selected products, routines, product shopping, where to buy, or finding deals/discounts. Reply with exactly one token: allowed or not_allowed.",
+    },
+    {
+      role: "user",
+      content: text,
+    },
   ];
 
-  return allowedTopics.some((topic) => lowercaseText.includes(topic));
+  try {
+    const result = await sendMessagesToWorker(classifierMessages, false);
+    const decision = result.content.trim().toLowerCase();
+    const firstToken = decision.split(/\s+/)[0].replace(/[^a-z_]/g, "");
+
+    // Very lenient: only reject when the model clearly says not allowed.
+    if (
+      firstToken === "not_allowed" ||
+      firstToken === "disallowed" ||
+      firstToken === "offtopic" ||
+      firstToken === "off_topic" ||
+      decision.includes("not_allowed")
+    ) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    // Fail open so users are not blocked by classifier issues.
+    return true;
+  }
 }
 
 async function sendMessagesToWorker(messages, webSearchEnabled) {
@@ -254,13 +359,24 @@ async function sendMessagesToWorker(messages, webSearchEnabled) {
     );
   }
 
+  const outboundMessages = webSearchEnabled
+    ? [
+        {
+          role: "system",
+          content:
+            "Web search mode is enabled. Use live web search for this response. Prioritize current information relevant to L'Oreal products, routines, launches, or pricing context when useful. Include source-backed details and provide citations/links when available.",
+        },
+        ...messages,
+      ]
+    : messages;
+
   const response = await fetch(WORKER_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      messages,
+      messages: outboundMessages,
       webSearch: webSearchEnabled,
     }),
   });
@@ -347,6 +463,7 @@ clearSelectedBtn.addEventListener("click", () => {
 
 generateRoutineBtn.addEventListener("click", async () => {
   try {
+    const webSearchEnabled = webSearchToggle.checked;
     const selectedProducts = allProducts.filter((product) =>
       selectedProductIds.has(product.id),
     );
@@ -378,7 +495,11 @@ generateRoutineBtn.addEventListener("click", async () => {
           selectedPayload,
           null,
           2,
-        )}. Explain when to use each item and suggest order (morning/evening if relevant).`,
+        )}. Explain when to use each item and suggest order (morning/evening if relevant). ${
+          webSearchEnabled
+            ? "Use live web search before answering. Add current, relevant context for these L'Oreal products or routine steps (such as availability, recent product details, or deal-aware shopping notes when appropriate), and include citations/links for web-sourced claims."
+            : ""
+        }`,
       },
     ];
 
@@ -386,7 +507,7 @@ generateRoutineBtn.addEventListener("click", async () => {
 
     const result = await sendMessagesToWorker(
       conversationHistory,
-      webSearchToggle.checked,
+      webSearchEnabled,
     );
 
     appendMessage("assistant", result.content, result.citations);
@@ -416,16 +537,16 @@ chatForm.addEventListener("submit", async (event) => {
     return;
   }
 
-  if (!topicIsAllowed(message)) {
-    appendMessage(
-      "assistant",
-      "Please keep follow-up questions focused on your routine, skincare, haircare, makeup, fragrance, or beauty topics.",
-    );
-    userInput.value = "";
-    return;
-  }
-
   try {
+    const isAllowedTopic = await topicIsAllowedByLlm(message);
+    if (!isAllowedTopic) {
+      // Soft gate only: do not block the user message.
+      appendMessage(
+        "assistant",
+        "I will still try to help. For best results, keep follow-up questions focused on your routine and beauty topics.",
+      );
+    }
+
     appendMessage("user", message);
     conversationHistory.push({ role: "user", content: message });
 
