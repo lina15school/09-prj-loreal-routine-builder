@@ -1,0 +1,59 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Inject Worker URL from secret
+        shell: bash
+        run: |
+          set -e
+          URL="${{ secrets.WORKER_URL }}"
+
+          if [ -z "$URL" ]; then
+            URL="${{ vars.WORKER_URL }}"
+          fi
+
+          if [ -z "$URL" ]; then
+            echo "No WORKER_URL secret or variable found. Keeping existing config.js value."
+            exit 0
+          fi
+
+          cat > config.js <<EOF
+          window.APP_CONFIG = {
+            WORKER_URL: "$URL",
+          };
+          EOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
